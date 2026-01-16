@@ -786,6 +786,14 @@ fn create_virtio_devices(
         devs.push(create_simple_media_device(cfg.protection_type)?);
     }
 
+    #[cfg(feature = "iceoryx2-media")]
+    if let Some(ref iceoryx2_media_config) = cfg.iceoryx2_media {
+        devs.push(create_iceoryx2_media_device(
+            cfg.protection_type,
+            iceoryx2_media_config,
+        )?);
+    }
+
     #[cfg(all(feature = "media", feature = "video-decoder"))]
     {
         for (tube, backend) in media_adapter_cfg {
