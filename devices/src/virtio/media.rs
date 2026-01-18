@@ -10,6 +10,9 @@
 #[cfg(feature = "video-decoder")]
 pub mod decoder_adapter;
 
+#[cfg(feature = "iceoryx2-media")]
+pub mod iceoryx2_capture;
+
 use std::collections::BTreeMap;
 use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;
@@ -775,4 +778,47 @@ pub fn create_virtio_media_decoder_adapter_device(
         config,
         create_device,
     )))
+}
+
+/// Create an iceoryx2-based capture device for EVS camera support.
+///
+/// This device receives camera frames via iceoryx2 shared memory and exposes them
+/// as a V4L2 capture device to the guest. Use this for scalable camera virtualization
+/// without kernel modules like v4l2loopback.
+#[cfg(feature = "iceoryx2-media")]
+pub fn create_virtio_media_iceoryx2_capture_device(
+    features: u64,
+    topic_name: String,
+    width: u32,
+    height: u32,
+    format: iceoryx2_capture::PixelFormatType,
+) -> Box<dyn VirtioDevice> {
+    use iceoryx2_capture::FrameConfig;
+    use iceoryx2_capture::Iceoryx2CaptureDevice;
+    use virtio_media::v4l2r::ioctl::Capabilities;
+
+    let frame_config = FrameConfig::new(width, height, format);
+
+    let mut card = [0u8; 32];
+    let card_name = "iceoryx2_evs";
+    card[0..card_name.len()].copy_from_slice(card_name.as_bytes());
+
+    let device = CrosvmVirtioMediaDevice::new(
+        features,
+        VirtioMediaDeviceConfig {
+            device_caps: (Capabilities::VIDEO_CAPTURE | Capabilities::STREAMING).bits(),
+            device_type: 0, // VFL_TYPE_VIDEO
+            card,
+        },
+        move |event_queue, _, host_mapper| {
+            Ok(Iceoryx2CaptureDevice::new(
+                event_queue,
+                host_mapper,
+                topic_name.clone(),
+                frame_config.clone(),
+            ))
+        },
+    );
+
+    Box::new(device)
 }

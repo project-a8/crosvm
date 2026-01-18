@@ -1123,6 +1123,46 @@ pub fn create_v4l2_device<P: AsRef<Path>>(
     Ok(VirtioDeviceStub { dev, jail: None })
 }
 
+#[cfg(feature = "iceoryx2-media")]
+pub fn create_iceoryx2_media_device(
+    protection_type: ProtectionType,
+    config: &str,
+) -> DeviceResult {
+    use devices::virtio::media::create_virtio_media_iceoryx2_capture_device;
+    use devices::virtio::media::iceoryx2_capture::PixelFormatType;
+
+    // Parse config: "TOPIC[,width=WIDTH][,height=HEIGHT][,format=FORMAT]"
+    // Format can be: rgba (default), nv12, nv21
+    let mut topic_name = config.to_string();
+    let mut width = 640u32;
+    let mut height = 480u32;
+    let mut format = PixelFormatType::Rgba;
+
+    if let Some(comma_pos) = config.find(',') {
+        topic_name = config[..comma_pos].to_string();
+        let params = &config[comma_pos + 1..];
+        for param in params.split(',') {
+            if let Some(val) = param.strip_prefix("width=") {
+                width = val.parse().unwrap_or(640);
+            } else if let Some(val) = param.strip_prefix("height=") {
+                height = val.parse().unwrap_or(480);
+            } else if let Some(val) = param.strip_prefix("format=") {
+                format = match val.to_lowercase().as_str() {
+                    "rgba" => PixelFormatType::Rgba,
+                    "nv12" => PixelFormatType::Nv12,
+                    "nv21" => PixelFormatType::Nv21,
+                    _ => PixelFormatType::Rgba,
+                };
+            }
+        }
+    }
+
+    let features = virtio::base_features(protection_type);
+    let dev = create_virtio_media_iceoryx2_capture_device(features, topic_name, width, height, format);
+
+    Ok(VirtioDeviceStub { dev, jail: None })
+}
+
 #[cfg(all(feature = "media", feature = "video-decoder"))]
 pub fn create_virtio_media_adapter(
     protection_type: ProtectionType,

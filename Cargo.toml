@@ -337,6 +337,9 @@ vaapi = ["devices/vaapi"]
 ## Enables the virtio-media device.
 media = ["devices/media"]
 
+## Enables the iceoryx2-based virtio-media capture device for EVS camera support.
+iceoryx2-media = ["devices/iceoryx2-media"]
+
 #! ### Linux-specific feature flags
 
 ## Enables the use of the GenieZone hypervisor

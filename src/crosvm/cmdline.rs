@@ -1309,6 +1309,13 @@ pub struct RunCommand {
     #[argh(option)]
     pub hypervisor: Option<HypervisorKind>,
 
+    #[cfg(all(unix, feature = "iceoryx2-media"))]
+    #[argh(option, arg_name = "TOPIC[,width=W][,height=H][,format=FMT]")]
+    /// iceoryx2-based virtio-media capture device (repeatable for multiple cameras).
+    /// TOPIC is the iceoryx2 topic name. Optional: width, height (default 640x480),
+    /// format (rgba, nv12, nv21; default rgba).
+    pub iceoryx2_media: Vec<String>,
+
     #[cfg(feature = "balloon")]
     #[argh(option, arg_name = "N")]
     /// amount of guest memory outside the balloon at boot in MiB. (default: --mem)
@@ -3118,6 +3125,11 @@ impl TryFrom<RunCommand> for super::config::Config {
         {
             cfg.v4l2_proxy = cmd.v4l2_proxy;
             cfg.simple_media_device = cmd.simple_media_device.unwrap_or_default();
+        }
+
+        #[cfg(all(unix, feature = "iceoryx2-media"))]
+        {
+            cfg.iceoryx2_media = cmd.iceoryx2_media;
         }
 
         #[cfg(all(unix, feature = "media", feature = "video-decoder"))]
