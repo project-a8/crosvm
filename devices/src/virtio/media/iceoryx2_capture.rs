@@ -14,12 +14,15 @@ use std::io::SeekFrom;
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::os::fd::BorrowedFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
 use std::time::Duration;
 use std::time::Instant;
 
 use base::AsRawDescriptor;
 use base::Timer;
 use base::TimerTrait;
+use iceoryx2::port::listener::Listener;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::*;
 use iceoryx2::service::ipc_threadsafe;
@@ -216,19 +219,31 @@ pub struct Iceoryx2CaptureSession {
     streaming: bool,
     poll_timer: Timer,
     poll_timer_armed: bool,
+    /// Event fd from iceoryx2 listener for low-latency notification (dup'd from device)
+    event_fd: Option<OwnedFd>,
 }
 
 impl VirtioMediaDeviceSession for Iceoryx2CaptureSession {
     fn poll_fd(&self) -> Option<BorrowedFd> {
-        // SAFETY: `poll_timer` is owned by this session and lives at least as long as `&self`.
-        Some(unsafe { BorrowedFd::borrow_raw(self.poll_timer.as_raw_descriptor()) })
+        // Prefer event fd for low-latency notification, fall back to timer
+        if let Some(ref event_fd) = self.event_fd {
+            Some(event_fd.as_fd())
+        } else {
+            // SAFETY: `poll_timer` is owned by this session and lives at least as long as `&self`.
+            Some(unsafe { BorrowedFd::borrow_raw(self.poll_timer.as_raw_descriptor()) })
+        }
     }
 }
 
 impl Iceoryx2CaptureSession {
-    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+    // Timer interval - serves as fallback when event notification isn't ready,
+    // and as a safety net even with event notification (in case events are missed)
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
     fn update_poll_timer(&mut self) -> Result<(), i32> {
+        // Timer runs as a fallback/safety net regardless of event_fd status
+        // With event_fd: provides 100ms fallback if events are missed
+        // Without event_fd: provides 100ms polling until event_fd is acquired
         let should_arm = self.streaming && !self.queued_buffers.is_empty();
 
         if should_arm && !self.poll_timer_armed {
@@ -294,6 +309,8 @@ pub struct Iceoryx2CaptureDevice<Q: VirtioMediaEventQueue, HM: VirtioMediaHostMe
     frame_config: FrameConfig,
     // Iceoryx2 subscriber (lazily initialized)
     subscriber: Option<Subscriber<ipc_threadsafe::Service, CameraFrame, ()>>,
+    // Event listener for low-latency notification
+    event_listener: Option<Listener<ipc_threadsafe::Service>>,
     node: Option<Node<ipc_threadsafe::Service>>,
     last_subscriber_init_attempt: Option<Instant>,
 }
@@ -316,6 +333,7 @@ where
             topic_name,
             frame_config,
             subscriber: None,
+            event_listener: None,
             node: None,
             last_subscriber_init_attempt: None,
         }
@@ -371,6 +389,33 @@ where
 
         let subscriber = service.subscriber_builder().create()?;
 
+        // Try to create event listener for low-latency notification
+        let event_service_name = format!("{}/notify", self.topic_name);
+        match ServiceName::new(&event_service_name) {
+            Ok(event_svc_name) => {
+                match node.service_builder(&event_svc_name).event().open() {
+                    Ok(event_service) => match event_service.listener_builder().create() {
+                        Ok(listener) => {
+                            base::debug!(
+                                "Event listener created for low-latency notification: {}",
+                                event_service_name
+                            );
+                            self.event_listener = Some(listener);
+                        }
+                        Err(e) => {
+                            base::debug!("Failed to create event listener: {:?}", e);
+                        }
+                    },
+                    Err(e) => {
+                        base::debug!("Event service not available: {:?}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                base::debug!("Invalid event service name: {:?}", e);
+            }
+        }
+
         self.node = Some(node);
         self.subscriber = Some(subscriber);
 
@@ -380,6 +425,23 @@ where
         );
 
         Ok(())
+    }
+
+    /// Get a dup'd file descriptor from the event listener (if available)
+    fn dup_event_fd(&self) -> Option<OwnedFd> {
+        self.event_listener.as_ref().and_then(|listener| {
+            let fd = listener.file_descriptor();
+            // SAFETY: native_handle() returns the raw fd value
+            let raw_fd = unsafe { fd.native_handle() };
+            // SAFETY: dup returns a new fd that we take ownership of
+            let duped = unsafe { libc::dup(raw_fd) };
+            if duped >= 0 {
+                Some(unsafe { OwnedFd::from_raw_fd(duped) })
+            } else {
+                base::warn!("Failed to dup event listener fd");
+                None
+            }
+        })
     }
 
     /// Try to receive and process frames from iceoryx2 (non-blocking).
@@ -473,6 +535,10 @@ where
     type Session = Iceoryx2CaptureSession;
 
     fn new_session(&mut self, session_id: u32) -> Result<Self::Session, i32> {
+        // Try to initialize subscriber early to get event fd
+        self.maybe_init_subscriber();
+        let event_fd = self.dup_event_fd();
+
         Ok(Iceoryx2CaptureSession {
             id: session_id,
             frame_count: 0,
@@ -481,6 +547,7 @@ where
             streaming: false,
             poll_timer: Timer::new().map_err(|_| libc::EIO)?,
             poll_timer_armed: false,
+            event_fd,
         })
     }
 
@@ -529,8 +596,25 @@ where
     }
 
     fn process_events(&mut self, session: &mut Self::Session) -> Result<(), i32> {
-        // Drain the timerfd to avoid busy looping in the wait context.
-        session.poll_timer.mark_waited().map_err(|_| libc::EIO)?;
+        // Drain the timerfd if it was armed (handles both timer-only and hybrid modes)
+        if session.poll_timer_armed {
+            let _ = session.poll_timer.mark_waited();
+        }
+
+        // Drain event notifications if we have a listener (non-blocking)
+        if let Some(ref listener) = self.event_listener {
+            while listener.try_wait_one().ok().flatten().is_some() {}
+        }
+
+        // Try to upgrade to event-based if subscriber became available late
+        // Note: poll_fd() will return event_fd after this, but VM may still poll timer
+        // until next registration cycle. Timer continues as fallback.
+        if self.event_listener.is_some() && session.event_fd.is_none() {
+            if let Some(fd) = self.dup_event_fd() {
+                base::info!("Acquired event fd for iceoryx2 capture (late subscriber init)");
+                session.event_fd = Some(fd);
+            }
+        }
 
         self.try_process_frames(session);
         session.update_poll_timer()?;
