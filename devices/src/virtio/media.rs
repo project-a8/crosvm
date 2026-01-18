@@ -791,12 +791,13 @@ pub fn create_virtio_media_iceoryx2_capture_device(
     topic_name: String,
     width: u32,
     height: u32,
+    format: iceoryx2_capture::PixelFormatType,
 ) -> Box<dyn VirtioDevice> {
     use iceoryx2_capture::FrameConfig;
     use iceoryx2_capture::Iceoryx2CaptureDevice;
     use virtio_media::v4l2r::ioctl::Capabilities;
 
-    let frame_config = FrameConfig::nv12(width, height);
+    let frame_config = FrameConfig::new(width, height, format);
 
     let mut card = [0u8; 32];
     let card_name = "iceoryx2_evs";

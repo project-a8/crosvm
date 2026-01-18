@@ -787,7 +787,7 @@ fn create_virtio_devices(
     }
 
     #[cfg(feature = "iceoryx2-media")]
-    if let Some(ref iceoryx2_media_config) = cfg.iceoryx2_media {
+    for iceoryx2_media_config in &cfg.iceoryx2_media {
         devs.push(create_iceoryx2_media_device(
             cfg.protection_type,
             iceoryx2_media_config,

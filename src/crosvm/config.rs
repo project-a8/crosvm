@@ -668,7 +668,7 @@ pub struct Config {
     pub hugepages: bool,
     pub hypervisor: Option<HypervisorKind>,
     #[cfg(feature = "iceoryx2-media")]
-    pub iceoryx2_media: Option<String>,
+    pub iceoryx2_media: Vec<String>,
     #[cfg(feature = "balloon")]
     pub init_memory: Option<u64>,
     pub initrd_path: Option<PathBuf>,
@@ -974,7 +974,7 @@ impl Default for Config {
             #[cfg(feature = "media")]
             simple_media_device: Default::default(),
             #[cfg(feature = "iceoryx2-media")]
-            iceoryx2_media: None,
+            iceoryx2_media: Vec::new(),
             #[cfg(any(feature = "slirp-ring-capture", feature = "slirp-debug"))]
             slirp_capture_file: None,
             #[cfg(target_arch = "x86_64")]
